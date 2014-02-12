@@ -37,19 +37,32 @@ function ConnectionPool(adapter, connParams, options) {
     options.max = 1
   }
   
+  var self = this;
   var poolOpts = {
     min: options.min || 0,
     max: options.max || 10,
     create: function (ready) {
       adapter.createConnection(connParams, function (err, conn) {
         if (err) return ready(err);
-        else if (options.onConnect) options.onConnect(conn, ready)
-        else ready(null, conn)
-      })
+        else {
+          conn.on('error', function(err) {
+            //Re-emit the error from the connection 
+            self.emit('error', err, conn);
+            //Destroy the connection
+            self.pool.destroy(conn);
+          });
+          if (options.onConnect) options.onConnect(conn, ready)
+          else ready(null, conn)
+        }
+      });
     },
     destroy: function (conn) {
       conn.end()
-      conn._events = {}
+      conn.removeAllListeners();
+      //Re-emit the error from the connection 
+      conn.on('error', function(err) {
+        self.emit('error', err, conn);
+      });
     },
 
     log: options.log
@@ -64,9 +77,8 @@ function ConnectionPool(adapter, connParams, options) {
 }
 
 ConnectionPool.prototype.query = function (statement, params, callback) {
-  var self = this
-    , query = this.adapter.createQuery(statement, params, callback)
-
+  var self = this;
+    
   this.acquire(function (err, conn) {
     if (err) {
       if (typeof params === 'function') {
@@ -78,6 +90,15 @@ ConnectionPool.prototype.query = function (statement, params, callback) {
         return query.emit('error', err);
       }
     }
+    queryCallback = function(err, result) {
+        if (callback) { 
+          if (err) {
+            err.connection = conn
+          }
+          callback(err, result) 
+        }
+    }  
+    query = self.adapter.createQuery(statement, params, queryCallback)
     conn.query(query);
     self.emit('query', query)
     var release = once(self.release.bind(self, conn))
@@ -85,7 +106,7 @@ ConnectionPool.prototype.query = function (statement, params, callback) {
       release()
       // If this was the only error listener, re-emit the error from the pool.
       if (!this.listeners('error').length) {
-        self.emit('error', err)
+        self.emit('error', err, conn)
       }
     })
   })
